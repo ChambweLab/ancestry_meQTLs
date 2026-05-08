@@ -1,0 +1,232 @@
+---
+title: "Mediation Analysis for HLA community meQTL/eQTMs"
+author: "Kyriaki Founta"
+date: "2026-04-17"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(mediation)  
+library(tidyverse)
+library(dplyr)
+```
+
+## Load HLA eQTM community
+Load a list with all probes and genes in the HLA eQTM community
+```{r}
+comm <- read_csv("HLA_eQTM_community_networkx.txt",
+                 col_names = FALSE)
+```
+
+## Load data
+Load all significant eQTMs
+```{r}
+eqtms <- read_csv("p.adjust_sig_eQTMs_residuals_admix_proportions.csv")
+head(eqtms)
+```
+Load gene expression residuals
+```{r}
+expression <- read_csv("residuals_expression_admix_proportions.csv")
+head(expression)
+```
+
+Load methylation residuals
+```{r}
+methylation <- read_csv("residuals_methylation_admix_proportions.csv")
+head(methylation)
+```
+Keep same patients between methylation and expression matrix
+```{r}
+colnames(methylation)[1] <- "probe"
+methylation <- methylation[,c("probe",intersect(colnames(methylation), colnames(expression)))]
+```
+
+Create appropriate format for beta value matrix
+```{r}
+methylation <- as.data.frame(methylation)
+row.names(methylation) <- methylation[,1]
+methylation <- methylation[,-1]
+head(methylation)
+```
+
+Preprocess expression data
+```{r}
+expression <- as.data.frame(expression)
+
+row.names(expression) <- expression[,1]
+expression <- expression[,-1]
+
+head(expression)
+```
+
+From file with candidate eQTMs, keep only probe-gene pairs
+```{r}
+pairs <- eqtms[,c(1,2)]
+colnames(pairs) <- c("probe", "gene")
+head(pairs)
+```
+
+Now only select probes and genes in HLA community
+```{r}
+pairs2 <- pairs[which(pairs$probe %in% comm[,1]),]
+pairs3 <- pairs2[which(pairs2$probe %in% comm[,1]),]
+dim(pairs3)
+```
+
+## meSNP Genotypes
+Load genotypes for meSNPs obtained from the TCGA BRCA .vcf files (first column: variant id (meSNP), second column: probe (meQTL targeted probe), the rest of the columns: genotypes per variant per sample)
+```{r}
+gts <- read_csv("GTs_hla_eqtms.csv")
+
+colnames(gts)[2] <- "probe"
+
+head(gts)
+```
+Process GT df
+```{r}
+gts2 <- as.data.frame(unique(gts[,-2]))
+
+row.names(gts2) <- gts2[,1]
+gts2 <- gts2[,-1]
+
+head(gts2)
+```
+Keep same samples across datasets
+```{r}
+meth <- methylation[,intersect(colnames(methylation), colnames(gts2))]
+gts3 <- gts2[,colnames(meth)]
+expr <- expression[,colnames(meth)]
+
+# Sanity check No 1
+all.equal(colnames(meth), colnames(gts3))
+```
+
+```{r}
+# Sanity check No 2
+all.equal(colnames(meth), colnames(expr))
+```
+
+## Create dataframe to run mediation analysis on 
+Add GTs per variant in variant-probe pairs df
+```{r}
+nets <- merge(pairs3, gts[,c(1:2)], by = "probe")
+head(nets)
+```
+
+## Run mediation analysis with boot = FALSE
+Set up null dataframe
+```{r}
+library(mediation)
+
+overall_results <- data.frame(  
+  probe = nets$probe,  
+  gene = nets$gene,  
+  variant_id = nets$variant_id,  
+  ACME_estimate = NA,  
+  ACME_ci_lower = NA,  
+  ACME_ci_upper = NA,  
+  ACME_pval = NA,  
+  ADE_estimate = NA,  
+  ADE_ci_lower = NA,  
+  ADE_ci_upper = NA,  
+  ADE_pval = NA,  
+  total_effect_estimate = NA,  
+  total_effect_pval = NA,  
+  prop_mediated_estimate = NA,  
+  prop_mediated_pval = NA  
+)  
+```
+
+Run mediation analysis in a loop
+```{r}
+n_sims <- 5000  
+
+for (i in 1:nrow(nets)) {  
+    
+  # Extract data for this triplet  
+  snp_name   <- nets$variant_id[i]  
+  probe_name <- nets$probe[i]  
+  gene_name  <- nets$gene[i]  
+    
+  temp_geno <- as.numeric(gts3[snp_name, ])  
+  temp_meth <- as.numeric(meth[probe_name, ])  
+  temp_expr <- as.numeric(expr[gene_name, ])  
+    
+  # Build temporary data frame  
+  temp_df <- data.frame(  
+    genotype = temp_geno,  
+    mediator = temp_meth,  
+    outcome  = temp_expr  
+  )  
+    
+  # Remove rows with missing values  
+  temp_df <- na.omit(temp_df)  
+    
+  tryCatch({  
+    # Mediator model: Methylation ~ SNP  
+    model_m <- lm(mediator ~ genotype, data = temp_df)  
+      
+    # Outcome model: Expression ~ SNP + Methylation  
+    model_y <- lm(outcome ~ genotype + mediator, data = temp_df)  
+      
+    # Mediation analysis  
+    med_result <- mediate(model_m, model_y,  
+                          treat    = "genotype",  
+                          mediator = "mediator",  
+                          boot     = FALSE,  
+                          sims     = n_sims)  
+      
+    med_summary <- summary(med_result)  
+      
+    # ACME = Average Causal Mediation Effect (indirect: SNP → Meth → Expr)  
+    overall_results$ACME_estimate[i]  <- med_summary$d0  
+    overall_results$ACME_ci_lower[i]  <- med_summary$d0.ci[1]  
+    overall_results$ACME_ci_upper[i]  <- med_summary$d0.ci[2]  
+    overall_results$ACME_pval[i]      <- med_summary$d0.p  
+      
+    # ADE = Average Direct Effect (direct: SNP → Expr, bypassing Meth)  
+    overall_results$ADE_estimate[i]   <- med_summary$z0  
+    overall_results$ADE_ci_lower[i]   <- med_summary$z0.ci[1]  
+    overall_results$ADE_ci_upper[i]   <- med_summary$z0.ci[2]  
+    overall_results$ADE_pval[i]       <- med_summary$z0.p  
+      
+    # Total effect  
+    overall_results$total_effect_estimate[i] <- med_summary$tau.coef  
+    overall_results$total_effect_pval[i]     <- med_summary$tau.p  
+      
+    # Proportion mediated  
+    overall_results$prop_mediated_estimate[i] <- med_summary$n0  
+    overall_results$prop_mediated_pval[i]     <- med_summary$n0.p  
+      
+  }, error = function(e) {  
+    message(paste("Error at triplet", i,   
+                  "(", snp_name, probe_name, gene_name, "):", e$message))  
+  })  
+    
+  # Optional: print progress  
+  if (i %% 100 == 0) message(paste("Completed", i, "of", nrow(nets)))  
+}  
+```
+
+Correct for multiple testing
+```{r}
+overall_results$ACME_p_adjusted <- p.adjust(overall_results$ACME_pval, method = "BH")  
+overall_results$ADE_p_adjusted  <- p.adjust(overall_results$ADE_pval, method = "BH")  
+overall_results$total_effect_p_adjusted  <- p.adjust(overall_results$total_effect_pval, method = "BH")  
+overall_results$prop_mediated_p_adjusted <- p.adjust(overall_results$prop_mediated_pval, method = "BH")  
+```
+
+Examine significant results
+```{r}
+# Triplets where methylation significantly mediates the SNP→Expression effect  
+significant_mediations <- overall_results[which(overall_results$ACME_p_adjusted < 0.05), ]  
+message(paste(nrow(significant_mediations), "significant mediations out of", nrow(overall_results)))
+
+head(significant_mediations[order(significant_mediations$ACME_p_adjusted), ])  
+```
+Save significant mediation results
+```{r}
+write.csv(significant_mediations[order(significant_mediations$ACME_p_adjusted), ], "sig_mediation_5000_sims.csv",
+          row.names = F)
+```
