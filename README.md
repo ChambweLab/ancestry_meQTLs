@@ -18,7 +18,7 @@ Includes code to perform differentially expression analysis.
 
 ### meQTL-analysis  
 Includes code to:  
-- Obtain methylation residuals, process them, and perform meQTL analysis on aDMSs (`ancestry_meQTL_analysis/`)  
+- Obtain methylation residuals, process them, and perform meQTL analysis on aDMS (`ancestry_meQTL_analysis/`)  
 - Perform control meQTL analysis with permutations (`control_perm_meQTL_analysis/`) 
 - Obtain population-specific gnomAD allele frequencies for ancestry-related and control meSNPs (`gnomad_AF_analysis/`) 
 
